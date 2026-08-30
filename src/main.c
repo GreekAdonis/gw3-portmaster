@@ -94,6 +94,82 @@ static int _signbit(double d)  { return signbit(d); }
 static int  ret0(void)  { return 0; }
 static int  ret1(void)  { return 1; }
 
+/* ── GW3 joypad wiring ────────────────────────────────────────────────────
+ * Reverse-engineered from libgwnext.so (2026-08-30):
+ *
+ *  g_JoypadStates (dynsym 0x9240a8, 144 B) = 4 joypads x 9 words:
+ *      word 0      : button bitmask
+ *      words 1..8  : float axis[0..7]  (order: LX LY RX RY LTrig RTrig HatY HatX)
+ *  _Z16GetJoypadButtonsi / _Z13GetJoypadAxisii read that array directly;
+ *  _Z16JoyButtonPressedi14E_JoypadButton == (mask >> btn) & 1.
+ *
+ *  E_JoypadButton bit order (from the _Z21GetJoypadValueForAxisi9InputAxis
+ *  jump table @0x451214 -> JoyButtonPressed(joy, N); positions proven,
+ *  face/trigger/start-back labels are conventional for that layout):
+ *      0 A   1 B   2 X   3 Y   4 L1  5 R1  6 L2/LTrig  7 R2/RTrig
+ *      8 DpadUp  9 DpadDown  10 DpadLeft  11 DpadRight  12 Start  13 Back
+ *
+ *  Detection: _ZN12UserControls27GetMasterUserControllerTypeEv returns the
+ *  User-0 controller type -- 0 = physical joypad (Lua IsUsingJoypad true only
+ *  here), 3 = on-screen virtual stick (IsControllerVStick), 5 = none.
+ *  _Z12GetNoJoypadsv is the *count* of connected pads (used as a loop bound).
+ *  _ZN11InputDevice6UpdateEv @0x451dcc pops the blocking "reconnect
+ *  controller" popup (text 0x1aa) whenever type==0 && count==0 in active play,
+ *  so we pin count=1 and type=0.
+ */
+extern int   g_gamepad_buttons;   /* SDL_CONTROLLER_BUTTON_* mask, see ProcessEvents */
+extern float g_gamepad_axis[6];
+
+int gw3_engine_button_mask(void) {
+    int s = g_gamepad_buttons, m = 0;
+    if (s & 0x001)  m |= 1 << 0;   /* A              */
+    if (s & 0x002)  m |= 1 << 1;   /* B              */
+    if (s & 0x004)  m |= 1 << 2;   /* X              */
+    if (s & 0x008)  m |= 1 << 3;   /* Y              */
+    if (s & 0x040)  m |= 1 << 4;   /* L1 / LShoulder */
+    if (s & 0x080)  m |= 1 << 5;   /* R1 / RShoulder */
+    if (g_gamepad_axis[4] > 0.30f) m |= 1 << 6;  /* L2 (analog trigger -> digital) */
+    if (g_gamepad_axis[5] > 0.30f) m |= 1 << 7;  /* R2 (analog trigger -> digital) */
+    if (s & 0x100)  m |= 1 << 8;   /* DPad Up    */
+    if (s & 0x200)  m |= 1 << 9;   /* DPad Down   */
+    if (s & 0x400)  m |= 1 << 10;  /* DPad Left  */
+    if (s & 0x800)  m |= 1 << 11;  /* DPad Right */
+    if (s & 0x010)  m |= 1 << 12;  /* Start */
+    if (s & 0x020)  m |= 1 << 13;  /* Back / Select */
+    return m;
+}
+
+float gw3_engine_axis(int a) {
+    switch (a) {
+    case 0: case 1: case 2: case 3: {   /* analog sticks: rescaled deadzone */
+        float v = g_gamepad_axis[a];
+        float mag = v < 0 ? -v : v;
+        if (mag <= STICK_DEADZONE) return 0.0f;
+        float s = (mag - STICK_DEADZONE) / (1.0f - STICK_DEADZONE);
+        if (s > 1.0f) s = 1.0f;
+        return v < 0 ? -s : s;
+    }
+    case 4: case 5:                     /* triggers: raw 0..1 */
+        return g_gamepad_axis[a];
+    }
+    /* axes 6/7 (Hat) left at 0 — D-pad is delivered through button bits 8..11,
+     * which the engine already folds into the combined D-pad InputAxis. */
+    return 0.0f;
+}
+
+/* Pin User 0 to "physical joypad, one pad connected". */
+static int GetNoJoypads_hook(void) { return 1; }
+static int GetMasterUserControllerType_hook(void) { return 0; }
+
+static int GetJoypadButtons_hook(int joy) {
+    return joy == 0 ? gw3_engine_button_mask() : 0;
+}
+static int GetJoypadAxis_hook(int joy, int axis) {
+    float v = (joy == 0 && axis >= 0 && axis <= 7) ? gw3_engine_axis(axis) : 0.0f;
+    int bits; memcpy(&bits, &v, sizeof bits);
+    return bits; /* soft-float ABI: float result returned in r0 */
+}
+
 static volatile int g_malloc_count = 0;
 static void *malloc_debug(size_t n) {
     return malloc(n);
@@ -1355,6 +1431,23 @@ static void patch_gw3(void) {
             (void *)gw3_mod.text_base,
             *(uint32_t *)(gw3_mod.text_base + 0x226098),
             *(uint32_t *)(gw3_mod.text_base + 0x22609c));
+
+    /* GW3 joypad: make the engine believe one physical joypad is connected and
+     * is User 0's master controller, then feed it live SDL pad state.
+     *   _Z12GetNoJoypadsv                                   -> 1  (pad count)
+     *   _ZN12UserControls27GetMasterUserControllerTypeEv    -> 0  (physical joypad)
+     * Without these, _ZN11InputDevice6UpdateEv fires the blocking "reconnect
+     * controller" popup (text 0x1aa) the instant a game is active -> no input
+     * in-game; type 3 would instead drop the game into on-screen-vstick mode
+     * (useless with no touchscreen).  GetJoypadButtons/Axis are pinned to our
+     * SDL state so the engine's per-frame input processor can't latch a stale
+     * array; pump_joy_input() in jni_patch.c also writes g_JoypadStates[0]. */
+    hook_addr(so_symbol(&gw3_mod, "_Z12GetNoJoypadsv"), (uintptr_t)GetNoJoypads_hook);
+    hook_addr(so_symbol(&gw3_mod, "_ZN12UserControls27GetMasterUserControllerTypeEv"),
+              (uintptr_t)GetMasterUserControllerType_hook);
+    hook_addr(so_symbol(&gw3_mod, "_Z16GetJoypadButtonsi"), (uintptr_t)GetJoypadButtons_hook);
+    hook_addr(so_symbol(&gw3_mod, "_Z13GetJoypadAxisii"), (uintptr_t)GetJoypadAxis_hook);
+    fprintf(stderr, "patch_gw3: joypad hooks -> NoJoypads=1 MasterType=0 Buttons/Axis=SDL\n");
 
     /* TODO(gw3): hook the engine's screen-size, per-frame event/poll and input
      * functions once their symbol names are known. Example shape:

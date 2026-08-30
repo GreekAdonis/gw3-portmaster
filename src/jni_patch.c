@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <locale.h>
 #include <unistd.h>
+#include <math.h>
 
 #include <SDL2/SDL.h>
 #include <GLES2/gl2.h>
@@ -242,6 +243,33 @@ static int DeleteFile(char *file) {
     char path[640];
     snprintf(path, sizeof(path), "%s/%s", g_data_path, file);
     return remove(path) == 0 ? 1 : 0;
+}
+
+void send_touch_event(int action, int slot, int x, int y);
+
+/* ── Input forwarding ──────────────────────────────────────────────────────
+ * GW3 reads live pad state straight out of g_JoypadStates (dynsym 0x9240a8):
+ * 4 joypads x 9 words = { u32 buttonMask, f32 axis[8] }.  We own joypad 0 and
+ * rewrite it every frame from SDL.  Button bit order and axis order come from
+ * gw3_engine_button_mask() / gw3_engine_axis() in main.c (see the note there).
+ */
+static void pump_joy_input(void) {
+    extern so_module gw3_mod;
+    extern int   gw3_engine_button_mask(void);
+    extern float gw3_engine_axis(int);
+    static int  *joy = NULL;
+    static int   resolved = 0;
+    if (!resolved) {
+        joy = (int *)so_symbol(&gw3_mod, "g_JoypadStates");
+        resolved = 1;
+        fprintf(stderr, "GW3 input: g_JoypadStates @%p\n", (void *)joy);
+    }
+    if (!joy) return;
+    joy[0] = gw3_engine_button_mask();          /* joy0 word 0 = button mask */
+    for (int a = 0; a < 8; a++) {
+        float v = gw3_engine_axis(a);
+        memcpy(&joy[1 + a], &v, sizeof v);      /* joy0 words 1..8 = axis[0..7] */
+    }
 }
 
 /* ── JNI vtable callbacks (DISCOVERY build: log everything, return benign) ── */
@@ -646,7 +674,15 @@ void jni_load(void) {
         if (fn_setAppWindowSize)    STEP("setAppWindowSize",   fn_setAppWindowSize(fake_env, &fake_thiz, 1024, 768));
         if (fn_setGameFilesDir)     STEP("setGameFilesDir",    fn_setGameFilesDir(fake_env, &fake_thiz, (void *)data_path_slash()));
         if (fn_setPrivateFilesDir)  STEP("setPrivateFilesDir", fn_setPrivateFilesDir(fake_env, &fake_thiz, (void *)data_path_slash()));
-        //if (fn_setNoJoysticks)      STEP("setNoJoysticks",     fn_setNoJoysticks(fake_env, &fake_thiz, 0));
+        /* g_NoJoypads is the *count* of connected pads (see main.c note).
+         * setNoJoysticks(1) sets it; _Z12GetNoJoypadsv is also hooked ->1 in
+         * patch_gw3.  Real pad state is fed per-frame by pump_joy_input(). */
+        if (fn_setNoJoysticks)      STEP("setNoJoysticks",     fn_setNoJoysticks(fake_env, &fake_thiz, 1));
+        {
+            int *p_nojoy = (int *)so_symbol(&gw3_mod, "g_NoJoypads");
+            if (p_nojoy) { *p_nojoy = 1; fprintf(stderr, "GW3 input: g_NoJoypads(count) @%p -> 1\n", (void *)p_nojoy); }
+        }
+        fflush(stderr);
 
         STEP("viewInitGameConfig", fn_viewInitGameConfig(fake_env, &fake_thiz, &fake_config));
         if (fn_viewOnSurfaceCreated) STEP("viewOnSurfaceCreated", fn_viewOnSurfaceCreated(fake_env, &fake_thiz));
@@ -660,6 +696,7 @@ void jni_load(void) {
         unsigned long frame = 0;
         for (;;) {
             if (ProcessEvents()) break;
+            pump_joy_input();
             fn_viewOnDrawFrame(fake_env, &fake_thiz);
             if (frame == 300) {
                 /* one-shot render probe: is FBO 0 bound, is the backbuffer non-black? */
