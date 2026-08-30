@@ -51,6 +51,7 @@ char                g_data_path[512]  = DATA_PATH;
 
 /* FMOD companion modules, loaded from the data dir (see fmod_patch.c). */
 so_module fm_mod, fme_mod;
+int g_fmod_ok = 0;   /* set by fmod_preload(): real FMOD libs loaded */
 
 /* AAssetManager (NDK) shim implemented in aasset_patch.c. Opaque types are
  * passed through as void* here to avoid pulling in Android headers. */
@@ -140,18 +141,11 @@ int gw3_engine_button_mask(void) {
 }
 
 float gw3_engine_axis(int a) {
-    switch (a) {
-    case 0: case 1: case 2: case 3: {   /* analog sticks: rescaled deadzone */
-        float v = g_gamepad_axis[a];
-        float mag = v < 0 ? -v : v;
-        if (mag <= STICK_DEADZONE) return 0.0f;
-        float s = (mag - STICK_DEADZONE) / (1.0f - STICK_DEADZONE);
-        if (s > 1.0f) s = 1.0f;
-        return v < 0 ? -s : s;
-    }
-    case 4: case 5:                     /* triggers: raw 0..1 */
-        return g_gamepad_axis[a];
-    }
+    /* Sticks (0..3) and triggers (4/5) pass through raw: the odroidgo3-joypad
+     * kernel driver already does centre calibration / dead-zone, so a second
+     * dead-zone in here only eats range and (if per-axis) makes the stick snap
+     * to the cardinals.  Tune stick feel via OS joystick calibration. */
+    if (a >= 0 && a <= 5) return g_gamepad_axis[a];
     /* axes 6/7 (Hat) left at 0 — D-pad is delivered through button bits 8..11,
      * which the engine already folds into the combined D-pad InputAxis. */
     return 0.0f;
@@ -227,6 +221,40 @@ __attribute__((naked)) static void bionic_longjmp(void *buf, int val) {
         "moveq  r0,  #1\n"
         "bx     lr\n");
 }
+
+/* ── FMOD .so low-level deps not provided by glibc ───────────────────────── */
+
+/* FMOD's OpenSL output does dlopen("libOpenSLES.so"); hand it the SDL2-backed
+ * fake from fmod_opensl.c. Everything else passes through to the real loader. */
+static void *g_opensl_handle;   /* address is the sentinel handle value */
+
+static void *fmod_dlopen(const char *name, int flags) {
+    if (name && strstr(name, "OpenSLES")) {
+        fprintf(stderr, "fmod: dlopen(\"%s\") -> SDL2 OpenSL shim\n", name);
+        return &g_opensl_handle;
+    }
+    return dlopen(name, flags);
+}
+static void *fmod_dlsym(void *handle, const char *sym) {
+    if (handle == &g_opensl_handle) return fmod_opensl_sym(sym);
+    return dlsym(handle, sym);
+}
+static int fmod_dlclose(void *handle) {
+    if (handle == &g_opensl_handle) return 0;
+    return dlclose(handle);
+}
+
+/* bionic spellings glibc lacks */
+static int __android_log_write_shim(int prio, const char *tag, const char *msg) {
+    (void)prio;
+#ifdef DEBUG
+    fprintf(stderr, "[%s] %s\n", tag ? tag : "?", msg ? msg : "");
+#else
+    (void)tag; (void)msg;
+#endif
+    return 0;
+}
+static int *__errno_shim(void) { return &errno; }
 
 /* ── Android log → stderr ────────────────────────────────────────────────── */
 
@@ -1283,45 +1311,17 @@ static so_default_dynlib default_dynlib[] = {
     { "__gnu_ldivmod_helper",  (uintptr_t)__gnu_ldivmod_helper  },
     { "__gnu_uldivmod_helper", (uintptr_t)__gnu_uldivmod_helper },
 
-    /* ── FMOD: stubbed for silent audio (fmod_patch.c) ──────────────────────
-     * Real FMOD can't init on this device (needs libOpenSLES.so). Every FMOD
-     * symbol the engine imports binds here; getters that return an object hand
-     * back g_fmod_dummy, everything else returns FMOD_OK. */
-    { "FMOD_EventSystem_Create", (uintptr_t)fmod_stub_create },
-    { "FMOD_Debug_SetLevel",     (uintptr_t)fmod_stub_ok     },
-    { "FMOD_Memory_Initialize",  (uintptr_t)fmod_stub_ok     },
-    { "_ZN4FMOD11EventSystem4initEijPvj",                        (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD11EventSystem7releaseEv",                         (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD11EventSystem6updateEv",                          (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD11EventSystem12setMediaPathEPKc",                 (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD11EventSystem15getSystemObjectEPPNS_6SystemE",    (uintptr_t)fmod_stub_out1 },
-    { "_ZN4FMOD11EventSystem14getMusicSystemEPPNS_11MusicSystemE", (uintptr_t)fmod_stub_out1 },
-    { "_ZN4FMOD11EventSystem11getCategoryEPKcPPNS_13EventCategoryE", (uintptr_t)fmod_stub_out2 },
-    { "_ZN4FMOD11EventSystem4loadEPKcP19FMOD_EVENT_LOADINFOPPNS_12EventProjectE", (uintptr_t)fmod_stub_out3 },
-    { "_ZN4FMOD11EventSystem26getReverbAmbientPropertiesEP22FMOD_REVERB_PROPERTIES", (uintptr_t)fmod_stub_reverb },
-    { "_ZN4FMOD6System9setOutputE15FMOD_OUTPUTTYPE",             (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD6System9setDriverEi",                             (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD6System14setSpeakerModeE16FMOD_SPEAKERMODE",      (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD6System17set3DNumListenersEi",                    (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD6System23set3DListenerAttributesEiPK11FMOD_VECTORS3_S3_S3_", (uintptr_t)fmod_stub_ok },
-    { "_ZN4FMOD6System13getNumDriversEPi",                       (uintptr_t)fmod_stub_geti },
-    { "_ZN4FMOD6System13setFileSystemEPF11FMOD_RESULTPKciPjPPvS6_EPFS1_S5_S5_EPFS1_S5_S5_jS4_S5_EPFS1_S5_jS5_EPFS1_P18FMOD_ASYNCREADINFOS5_ESA_i", (uintptr_t)fmod_stub_ok },
-    { "_ZN4FMOD5Event5startEv",                                  (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD5Event4stopEb",                                   (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD5Event9setPausedEb",                              (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD5Event9setVolumeEf",                              (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD5Event9getVolumeEPf",                             (uintptr_t)fmod_stub_getf },
-    { "_ZN4FMOD5Event15set3DAttributesEPK11FMOD_VECTORS3_S3_",   (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD5Event18setPropertyByIndexEiPvb",                 (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD5Event16getNumParametersEPi",                     (uintptr_t)fmod_stub_geti },
-    { "_ZN4FMOD5Event12getParameterEPKcPPNS_14EventParameterE",  (uintptr_t)fmod_stub_out2 },
-    { "_ZN4FMOD5Event19getParameterByIndexEiPPNS_14EventParameterE", (uintptr_t)fmod_stub_out2 },
-    { "_ZN4FMOD5Event15getChannelGroupEPPNS_12ChannelGroupE",    (uintptr_t)fmod_stub_out1 },
-    { "_ZN4FMOD5Event7getInfoEPiPPcP15FMOD_EVENT_INFO",          (uintptr_t)fmod_stub_event_getinfo },
-    { "_ZN4FMOD14EventParameter8setValueEf",                     (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD14EventParameter6keyOffEv",                       (uintptr_t)fmod_stub_ok   },
-    { "_ZN4FMOD14EventParameter7getInfoEPiPPc",                  (uintptr_t)fmod_stub_param_getinfo },
-    { "_ZN4FMOD12ChannelGroup11getSpectrumEPfii19FMOD_DSP_FFT_WINDOW", (uintptr_t)fmod_stub_getspectrum },
+    /* ── FMOD: real libfmodex.so / libfmodevent.so are loaded by fmod_preload()
+     * and libgwnext's 35 FMOD imports bind to them via so_resolve_link (they
+     * are NOT listed here — a dynlib entry would shadow the real symbol).
+     * These are the low-level deps the FMOD .so files themselves pull in that
+     * glibc doesn't provide, plus the dlopen() shim that swaps FMOD's OpenSL
+     * ES backend for the SDL2 one in fmod_opensl.c. */
+    { "dlopen",              (uintptr_t)fmod_dlopen              },
+    { "dlsym",               (uintptr_t)fmod_dlsym               },
+    { "dlclose",             (uintptr_t)fmod_dlclose             },
+    { "__android_log_write", (uintptr_t)__android_log_write_shim },
+    { "__errno",             (uintptr_t)__errno_shim             },
 };
 
 /* ── NVThreadSpawnProc replacement ──────────────────────────────────────────
@@ -1397,13 +1397,17 @@ static void patch_gw3(void) {
     hook_addr(so_symbol(&gw3_mod, "_Z24NVThreadGetCurrentJNIEnvv"),
               (uintptr_t)NVThreadGetCurrentJNIEnv);
 
-    /* Audio is stubbed for silent play (see fmod_patch.c). Neutralise the two
-     * engine entry points that would drive the (FMOD-less) audio system: Init
-     * spawns the background job that walks FMOD event projects and crashes,
-     * and Update runs per frame. The public Audio start/stop helpers each
-     * null-check the (now never-created) audio-system global and bail. */
-    hook_addr(so_symbol(&gw3_mod, "_ZN5Audio4InitEv"),   (uintptr_t)ret0);
-    hook_addr(so_symbol(&gw3_mod, "_ZN5Audio6UpdateEv"), (uintptr_t)ret0);
+    /* Audio: only stub the engine's audio entry points when real FMOD failed
+     * to load (fmod_preload). With FMOD present, Audio::Init drives
+     * C_AudioSystem::Initialise -> FMOD EventSystem + our SDL2 OpenSL output,
+     * and Audio::Update pumps EventSystem::update() each frame. */
+    if (!g_fmod_ok) {
+        hook_addr(so_symbol(&gw3_mod, "_ZN5Audio4InitEv"),   (uintptr_t)ret0);
+        hook_addr(so_symbol(&gw3_mod, "_ZN5Audio6UpdateEv"), (uintptr_t)ret0);
+        fprintf(stderr, "patch_gw3: FMOD unavailable -> Audio::Init/Update stubbed (silent)\n");
+    } else {
+        fprintf(stderr, "patch_gw3: FMOD active -> Audio::Init/Update left live\n");
+    }
 
     /* sub_0x226098 is an event/telemetry ring-buffer writer: it copies a name
      * std::string from this+0x28, bumps 64-bit counters at this+0xd0/+0xe0 and
@@ -1786,7 +1790,7 @@ int main(int argc, char *argv[]) {
     stderr_fake = stderr;
 
     /* ── SDL2 init ──────────────────────────────────────────────────── */
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) < 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
@@ -1870,8 +1874,8 @@ int main(int argc, char *argv[]) {
      * resolving libgwnext, so its FMOD/AAsset imports bind to real code via
      * so_resolve_link (DT_NEEDED soname match) and the dynlib table. */
     aasset_patch_init();
-    fmod_preload(g_data_path, &fm_mod, &fme_mod, default_dynlib,
-                 sizeof(default_dynlib));
+    g_fmod_ok = (fmod_preload(g_data_path, &fm_mod, &fme_mod, default_dynlib,
+                              sizeof(default_dynlib)) == 0);
 
     so_resolve(&gw3_mod, default_dynlib,
                sizeof(default_dynlib), 0);

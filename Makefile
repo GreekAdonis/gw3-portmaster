@@ -34,7 +34,8 @@ SRCS    := src/main.c \
            src/jni_patch.c \
            src/opengl_patch.c \
            src/aasset_patch.c \
-           src/fmod_patch.c
+           src/fmod_patch.c \
+           src/fmod_opensl.c
 
 OBJS    := $(SRCS:.c=.o)
 TARGET  := gw3_r36

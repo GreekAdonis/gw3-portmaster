@@ -1,13 +1,30 @@
-/* fmod_patch.c -- FMOD handling for the Geometry Wars 3 port.
+/* fmod_patch.c -- load the game's bundled FMOD Ex / FMOD Event libraries.
  *
- * The game links libfmodex.so / libfmodevent.so (Android build). Those bind an
- * OpenSL ES output at init via dlopen("libOpenSLES.so"), which does not exist on
- * this device, so real FMOD cannot initialise. Rather than shim an audio
- * backend, we run the game SILENTLY: every FMOD symbol the engine imports is
- * bound (via the loader's dynlib table) to a stub here that returns FMOD_OK and
- * hands back a shared dummy object for the out-parameter getters. The engine's
- * own Audio/C_AudioSystem bookkeeping stays consistent; nothing ever calls into
- * real FMOD code.
+ * Geometry Wars 3 links libfmodevent.so (which NEEDs libfmodex.so), both
+ * armeabi-v7a Android builds of FMOD Ex 4.44.50. We map them with the same
+ * custom ELF loader used for libgwnext.so; libgwnext's 35 FMOD imports then
+ * bind to the real code through so_resolve_link (DT_NEEDED soname match).
+ *
+ * FMOD Ex 4.44 on Android has only these output backends compiled in:
+ * OpenSL ES, Java AudioTrack, NoSound, WavWriter. AudioTrack needs a JVM;
+ * ALSA/PulseAudio aren't present. So FMOD auto-selects the OpenSL output,
+ * which dlopen()s "libOpenSLES.so" and dlsym()s slCreateEngine + five
+ * SL_IID_* data symbols. main.c's fmod_dlopen() intercepts that and returns
+ * fmod_opensl.c -- a fake libOpenSLES backed by an SDL2 audio device.
+ *
+ * Reverse-engineered call path (libgwnext.so, 2026-08-30):
+ *   Audio::Init @0x22cb58 -> job -> C_AudioSystem::Initialise @0x2245dc:
+ *     FMOD_Memory_Initialize(10.5 MB pool)
+ *     FMOD_EventSystem_Create ; EventSystem::getSystemObject
+ *     System::getNumDrivers  (== 0 -> setOutput(NOSOUND) fallback)
+ *     EventSystem::getMusicSystem ; System::setSpeakerMode(STEREO)
+ *     EventSystem::init(128, 0x80, NULL, 0)
+ *     System::setFileSystem(C_AudioSystem::File{Open,Close,Read,Seek,...})
+ *       -> LogicalFS_OpenBundleFile -> the game's WAD mount (NOT libc fopen)
+ *     EventSystem::setMediaPath("audio/")
+ *   C_AudioSystem::LoadProject("neon.fev")  (project + neon_music_bank.fsb +
+ *     neon_sfx_bank.fsb live in the OBB under android/audio/)
+ *   Per frame: C_AudioSystem::Update -> EventSystem::update().
  */
 
 #include <stdint.h>
@@ -17,86 +34,36 @@
 #include "so_util.h"
 #include "fmod_patch.h"
 
-/* One dummy object handed back for every EventSystem/System/Event/EventProject/
- * EventGroup/EventCategory/ChannelGroup/... out-pointer. FMOD's C++ classes are
- * polymorphic and the engine makes *virtual* calls on the objects it gets back
- * (obj->vtable[n](obj, ...)), so the dummy needs a real vtable pointer at
- * offset 0 pointing at a table of no-op functions. The engine pre-zeroes the
- * out-locals it passes to those virtuals, so "return 0 and touch nothing" reads
- * back as "empty project / 0 groups / 0 events" — i.e. silent. */
-static int   fmod_vt_noop(void) { return 0; }
-static void *fmod_vtable[64];
-static void *fmod_dummy[8];                 /* [0] = &fmod_vtable (set at init) */
-static char  fmod_empty_str[1] = "";
-void *const  g_fmod_dummy = fmod_dummy;
-
-static void fmod_dummy_init(void) {
-    for (int i = 0; i < 64; i++) fmod_vtable[i] = (void *)(uintptr_t)fmod_vt_noop;
-    fmod_dummy[0] = fmod_vtable;
-}
-
-/* FMOD_OK == 0. Generic "did nothing, fine". */
-int fmod_stub_ok(void) { return 0; }
-
-/* Object getters: last argument is `Foo **out`. */
-int fmod_stub_create(void **out) {                       /* FMOD_EventSystem_Create */
-    if (out) *out = fmod_dummy;
-    return 0;
-}
-int fmod_stub_out1(void *thiz, void **out) {
-    (void)thiz;
-    if (out) *out = fmod_dummy;
-    return 0;
-}
-int fmod_stub_out2(void *thiz, void *a1, void **out) {
-    (void)thiz; (void)a1;
-    if (out) *out = fmod_dummy;
-    return 0;
-}
-int fmod_stub_out3(void *thiz, void *a1, void *a2, void **out) {
-    (void)thiz; (void)a1; (void)a2;
-    if (out) *out = fmod_dummy;
-    return 0;
-}
-
-/* Scalar getters. */
-int fmod_stub_geti(void *thiz, int *out)   { (void)thiz; if (out) *out = 0;    return 0; }
-int fmod_stub_getf(void *thiz, float *out) { (void)thiz; if (out) *out = 0.0f; return 0; }
-
-/* Event::getInfo(int *index, char **name, FMOD_EVENT_INFO *info) */
-int fmod_stub_event_getinfo(void *thiz, int *index, char **name, void *info) {
-    (void)thiz;
-    if (index) *index = 0;
-    if (name)  *name  = fmod_empty_str;
-    if (info)  memset(info, 0, 256);
-    return 0;
-}
-/* EventParameter::getInfo(int *index, char **name) */
-int fmod_stub_param_getinfo(void *thiz, int *index, char **name) {
-    (void)thiz;
-    if (index) *index = 0;
-    if (name)  *name  = fmod_empty_str;
-    return 0;
-}
-/* ChannelGroup::getSpectrum(float *arr, int numvalues, int ch, window) */
-int fmod_stub_getspectrum(void *thiz, float *arr, int numvalues, int ch, int win) {
-    (void)thiz; (void)ch; (void)win;
-    if (arr && numvalues > 0) memset(arr, 0, (size_t)numvalues * sizeof(float));
-    return 0;
-}
-/* EventSystem::getReverbAmbientProperties(FMOD_REVERB_PROPERTIES *out) */
-int fmod_stub_reverb(void *thiz, void *props) {
-    (void)thiz;
-    if (props) memset(props, 0, 256);
-    return 0;
-}
+extern so_module gw3_mod;   /* for so_flush_caches on the FMOD modules */
 
 int fmod_preload(const char *data_path, so_module *fm, so_module *fme,
-                 so_default_dynlib *dynlib, int dynlib_size) {
-    (void)data_path; (void)fm; (void)fme; (void)dynlib; (void)dynlib_size;
-    /* Real FMOD is never loaded — see file header. All FMOD imports are bound
-     * to the stubs above through main.c's dynlib table. */
-    fmod_dummy_init();
-    fprintf(stderr, "fmod_preload: FMOD stubbed (silent audio)\n");
+                 so_default_dynlib *dynlib, int dynlib_size)
+{
+    char path[600];
+
+    fmod_opensl_init();   /* build the SDL2-backed OpenSL shim tables */
+
+    snprintf(path, sizeof(path), "%s/libfmodex.so", data_path);
+    if (so_load(fm, path) < 0) {
+        fprintf(stderr, "fmod_preload: %s not found -- audio disabled (silent)\n", path);
+        return -1;
+    }
+    so_relocate(fm);
+    so_resolve(fm, dynlib, dynlib_size, 0);
+    so_flush_caches(fm);
+    so_initialize(fm);
+    fprintf(stderr, "fmod_preload: libfmodex.so loaded\n");
+
+    snprintf(path, sizeof(path), "%s/libfmodevent.so", data_path);
+    if (so_load(fme, path) < 0) {
+        fprintf(stderr, "fmod_preload: %s not found -- audio disabled (silent)\n", path);
+        return -1;
+    }
+    so_relocate(fme);
+    so_resolve(fme, dynlib, dynlib_size, 0);
+    so_flush_caches(fme);
+    so_initialize(fme);
+    fprintf(stderr, "fmod_preload: libfmodevent.so loaded -- FMOD audio armed\n");
+
     return 0;
 }
