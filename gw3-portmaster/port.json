@@ -1,0 +1,30 @@
+{
+    "version": 2,
+    "name": "gw3.zip",
+    "items": [
+        "Geometry Wars 3.sh",
+        "gw3"
+    ],
+    "items_opt": null,
+    "attr": {
+        "title": "Geometry Wars 3: Dimensions",
+        "desc": "Native 32-bit ARM port of the Android version of Geometry Wars 3: Dimensions, running the original libgwnext.so engine through a custom Android-on-Linux loader (KMS/DRM, GLES2, FMOD). You must supply your own copy of the game's OBB and the engine/FMOD .so files from the APK.",
+        "inst": "Copy main.35.com.activision.gw3.dimensions.obb, libgwnext.so, libfmodex.so and libfmodevent.so into this port's gw3/ folder, then launch. The engine reads the OBB directly.",
+        "genres": [
+            "arcade",
+            "shooter"
+        ],
+        "porter": [
+            "GreekAdonis"
+        ],
+        "image": {
+            "screenshot": "screenshot.png"
+        },
+        "rtr": true,
+        "runtime": null,
+        "reqs": [],
+        "arch": [
+            "armhf"
+        ]
+    }
+}
