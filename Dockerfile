@@ -5,7 +5,7 @@
 # packages directly into the system (multiarch) and override SYSROOT=/ when
 # invoking make, so /usr/include and /usr/lib/arm-linux-gnueabihf resolve.
 
-# NOTE: target device (R36UltraX / ArkOS4Clone) ships glibc 2.30, so we must
+# NOTE: target device (ArkOS) ships glibc 2.30, so we must
 # build against an OLDER glibc (buster = 2.28). Building against bookworm (2.36)
 # produces a binary that requires GLIBC_2.33/2.34 and fails to load on device.
 FROM debian:buster
@@ -19,6 +19,7 @@ RUN dpkg --add-architecture armhf && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         make \
+        curl \
         gcc-arm-linux-gnueabihf \
         g++-arm-linux-gnueabihf \
         binutils-arm-linux-gnueabihf \

@@ -109,8 +109,6 @@ all: $(TARGET) $(PRELOAD)
 portmaster: $(PM_TARGET) $(PRELOAD)
 	@echo "=== $(PM_TARGET): glibc version requirements ==="
 	@$(CROSS)objdump -T $(PM_TARGET) | grep -oE 'GLIBC_[0-9.]+' | sort -u | tr '\n' ' '; echo
-	@echo "=== $(INSTALLER_TARGET): glibc version requirements ==="
-	@$(CROSS)objdump -T $(INSTALLER_TARGET) | grep -oE 'GLIBC_[0-9.]+' | sort -u | tr '\n' ' '; echo
 
 # NOTE: GW3 does not ship a first-run installer (the engine reads the OBB
 # directly). installer.armhf is retained from the GTA CTW template but is NOT
