@@ -1,6 +1,8 @@
 # Build artifacts
 *.o
 *.so
+gw3
+gw3.pm
 gtactw_r36
 gtactw_r36.debug
 

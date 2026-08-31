@@ -1,0 +1,48 @@
+name: Build Portmaster Zip
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t gw3-build -f Dockerfile .
+
+      - name: Generate bullseye sysroot
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/build" \
+            -w /build \
+            gw3-build \
+            bash scripts/build-bullseye-sysroot.sh
+
+      - name: Cross-compile in Docker
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/build" \
+            -w /build \
+            gw3-build \
+            make SYSROOT=/ portmaster
+
+      - name: Copy binaries into port directory
+        run: |
+          cp gw3.pm gw3-portmaster/gw3/gw3
+          cp libclock_fix.so gw3-portmaster/gw3/
+
+      - name: Create Portmaster zip
+        run: |
+          cd gw3-portmaster
+          zip -r ../gw3.zip .
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gw3
+          path: gw3.zip
