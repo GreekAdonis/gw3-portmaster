@@ -6,6 +6,10 @@ on:
       - '*'
   workflow_dispatch:
 
+# Needed so tag builds can publish a GitHub Release with gw3.zip attached.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,18 +36,56 @@ jobs:
             gw3-build \
             make SYSROOT=/ portmaster
 
-      - name: Copy binaries into port directory
+      - name: Assemble PortMaster port
         run: |
           cp gw3.pm gw3-portmaster/gw3/gw3
           cp libclock_fix.so gw3-portmaster/gw3/
+          chmod +x "gw3-portmaster/Geometry Wars 3.sh" gw3-portmaster/gw3/gw3
 
-      - name: Create Portmaster zip
+      - name: Create PortMaster zip
         run: |
           cd gw3-portmaster
-          zip -r ../gw3.zip .
+          # Zip only the two top-level items PortMaster expects (see gw3/port.json
+          # "items"): the launcher script and the gw3/ data dir. Naming the entries
+          # explicitly avoids a leading "./" and stray dotfiles in the archive.
+          # The filename MUST stay gw3.zip -- gw3/port.json has "name": "gw3.zip".
+          zip -r ../gw3.zip "Geometry Wars 3.sh" gw3
+          cd ..
+          echo "=== gw3.zip contents ==="
+          unzip -l gw3.zip
 
-      - name: Upload zip artifact
+      - name: Upload gw3.zip as build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gw3
+          # Downloads as "gw3-portmaster-zip.zip" (GitHub's wrapper) containing the
+          # real "gw3.zip". Distinct outer name so the inner file is obviously the
+          # deliverable. For tag builds, prefer the Release asset below.
+          name: gw3-portmaster-zip
           path: gw3.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="PortMaster build of Geometry Wars 3: Dimensions (${GITHUB_REF_NAME}).
+
+          Download **gw3.zip** below and install it through PortMaster
+          (or drop it in \`/roms/ports\` and let PortMaster unpack it).
+
+          You must supply your own \`main.35.com.activision.gw3.dimensions.obb\`
+          and the engine/FMOD \`.so\` files from the game APK -- see the in-port
+          README for details."
+          # Create the release if it doesn't exist yet; otherwise just refresh
+          # the asset. --clobber lets a re-run of the same tag replace gw3.zip.
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" gw3.zip \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" gw3.zip \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Geometry Wars 3 -- ${GITHUB_REF_NAME}" \
+              --notes "${notes}"
+          fi
