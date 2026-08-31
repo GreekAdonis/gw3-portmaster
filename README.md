@@ -1,8 +1,8 @@
 # Geometry Wars 3: Dimensions - Linux handheld port
 
 A native Linux port of the Android version of **Geometry Wars 3: Dimensions**,
-targeting ARMv7 (32-bit) Linux handhelds such as the R36S / ArkOS / NextOS
-family (Rockchip RK3326, Mali GPU) running a Debian-based or buildroot CFW.
+targeting ARMv7 (32-bit) Linux handhelds such as the R36S / ArkOS family (Rockchip 
+RK3326, Mali GPU) running a Debian-based or buildroot CFW.
 
 The port loads the original Android engine `libgwnext.so` directly inside a
 small Linux host binary that emulates just enough of Android's runtime
@@ -19,7 +19,7 @@ at runtime.
 
 These come from v1.0.0 Android version of the game (Google Play or your
 own sideload). They are **not** in this repo for copyright reasons.
-
+evolved
 - `main.35.com.activision.gw3.dimensions.obb` - game data
 - The game APK - you can drop either:
   - a `.apk` (the engine + FMOD `.so` files are extracted from it at run time),
@@ -93,7 +93,7 @@ directory.
 
 ## Installing on the device
 
-Install through PortMaster, which unpacks the zip so the launcher sits next to
+Install through PortMaster, or unpack the zip so the launcher sits next to
 the `gw3/` folder. Then drop your user-supplied files into the port's `gw3/`
 directory:
 
@@ -112,7 +112,7 @@ verifies everything is present, then runs `gw3`. The log lives at
 
 - **CPU**: ARMv7-A 32-bit (Cortex-A7/A35/A53), NEON, hard-float
 - **GPU**: Mali / Panfrost GLES2 - bridged via KMS/DRM + `libGLESv2`
-- **OS**: ArkOS / NextOS / dArkOS (glibc 2.31+ for the PortMaster build)
+- **OS**: ArkOS / dArkOS / ROCKNIX / MuOS (glibc 2.31+ for the PortMaster build)
 - **Audio**: the game's FMOD Ex/Event libraries via ALSA.
 
 ---
