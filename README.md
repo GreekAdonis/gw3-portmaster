@@ -1,4 +1,4 @@
-# Geometry Wars 3: Dimensions — Linux handheld port
+# Geometry Wars 3: Dimensions - Linux handheld port
 
 A native Linux port of the Android version of **Geometry Wars 3: Dimensions**,
 targeting ARMv7 (32-bit) Linux handhelds such as the R36S / ArkOS / NextOS
@@ -15,63 +15,56 @@ at runtime.
 
 ---
 
-## Status (scaffold)
+## Additional requirements
 
-This is a **compilable starting point**, not a finished port. What is wired up:
-
-- Android-on-Linux host loader (`so_util`) with `RTLD_DEFAULT` fallback so the
-  engine's libc/libm/libstdc++ imports resolve automatically.
-- The engine's `AAssetManager` imports are served by a filesystem-backed shim
-  (`aasset_patch.c`) rooted at the data directory.
-- The engine's FMOD audio imports are satisfied by loading the game's own
-  `libfmodex.so` / `libfmodevent.so` (`fmod_patch.c`) — they share the engine's
-  `DT_NEEDED` sonames, so `so_resolve_link` binds them.
-- A GLES2 soft-float↔hard-float thunk layer (`opengl_patch.c`) plus extra GLES2
-  entry points the engine uses.
-- A fake JNI/JavaVM environment (`jni_patch.c`) so `JNI_OnLoad` succeeds.
-- The soft-float math entry points the engine calls (`fmod`, `tanf`, …) routed
-  through softfp thunks.
-
-### Known open work (runtime)
-
-1. **JNI method names are unknown.** The engine registers native methods via
-   `GetMethodID`/`RegisterNatives` with names we have not enumerated. Run the
-   port with the crash/resolve logging and capture the `jni_unimpl` /
-   `GetMethodID` failures, then implement those handlers in `jni_patch.c`.
-2. **FMOD audio output.** The Android FMOD build `dlopen`s `libOpenSLES.so` at
-   runtime, which does not exist on Linux. Audio init will fail at the output
-   stage. Options: ship a desktop FMOD armhf build, or shim `libOpenSLES`.
-3. **Asset container.** `AAssetManager_open` currently serves plain files from
-   the data dir. If the engine expects files *inside* the packed OBB container,
-   either unpack the OBB into the data dir or teach `AAssetManager_open` to read
-   the container format.
-4. **Input.** Twin-stick controls (move + aim/fire) need to be mapped to the
-   engine's input contract, which is discovered at runtime. The `ProcessEvents`/
-   controller hooks are GTA-CTW leftovers and must be adapted (`patch_gw3`).
-
----
-
-## What you need to supply
-
-These come from the legitimate Android version of the game (Google Play or your
+These come from v1.0.0 Android version of the game (Google Play or your
 own sideload). They are **not** in this repo for copyright reasons.
 
-- `main.35.com.activision.gw3.dimensions.obb` — game data
-- From the APK, `lib/armeabi-v7a/`:
-  - `libgwnext.so`      (the engine)
-  - `libfmodex.so`      (FMOD Ex)
-  - `libfmodevent.so`   (FMOD Event)
+- `main.35.com.activision.gw3.dimensions.obb` - game data
+- The game APK - you can drop either:
+  - a `.apk` (the engine + FMOD `.so` files are extracted from it at run time),
+    or
+  - a `.xapk` / `.apkm` bundle, which already contains **both** the APK and the
+    OBB.
 
-The engine reads the OBB directly; there is no separate APK-asset extraction
-step.
+The launcher unpacks `libgwnext.so`, `libfmodex.so` and `libfmodevent.so` from
+the APK automatically; the engine reads the OBB directly.
 
 ---
 
-## Building from source
+## Building the PortMaster zip
 
-### 1. Cross-compile toolchain (one-time, on a Debian/Ubuntu Linux host)
+A GitHub Actions workflow (`.github/workflows/build.yml`) does the full build:
+
+1. Builds the cross-compile Docker image (`Dockerfile`).
+2. Generates the Debian 11 "bullseye" armhf sysroot
+   (`scripts/build-bullseye-sysroot.sh`) so the binary keeps a low glibc floor
+   (2.31) for older PortMaster CFWs.
+3. Cross-compiles (`make SYSROOT=/ portmaster`) producing `gw3.pm` +
+   `libclock_fix.so`.
+4. Assembles the PortMaster zip and uploads it as an artifact named `gw3`.
+
+The zip has the standard PortMaster layout - the launcher script at the root,
+everything else in the `gw3/` subdirectory:
+
+```
+gw3.zip
+├── Geometry Wars 3.sh
+└── gw3/
+    ├── port.json
+    ├── README.md
+    ├── screenshot.png
+    ├── gameinfo.xml
+    ├── gw3                        (built from gw3.pm)
+    ├── libclock_fix.so
+    ├── gw3.gptk
+    └── licenses/
+```
+
+### Building locally
 
 ```bash
+# Cross-compile toolchain (one-time, on a Debian/Ubuntu Linux host)
 sudo dpkg --add-architecture armhf
 sudo apt-get update
 sudo apt-get install -y \
@@ -80,65 +73,46 @@ sudo apt-get install -y \
     libgles2-mesa-dev:armhf \
     libegl1-mesa-dev:armhf \
     zlib1g-dev:armhf
+
+# Build the old-glibc (PortMaster) binary: ./gw3.pm + ./libclock_fix.so
+make portmaster
 ```
 
-The Makefile expects headers/libs under `armhf-sysroot/root/usr/...`. Symlink
-that to your install root, or unpack the relevant `.deb` files there.
-
-### 2. Build
+Or build in Docker:
 
 ```bash
-make           # produces ./gw3 and ./libclock_fix.so
+./docker-make.sh portmaster
 ```
 
-For the old-glibc (PortMaster) binary:
-
-```bash
-make portmaster   # produces ./gw3.pm + ./libclock_fix.so
-```
-
-Both are ARMv7-A hard-float ELFs.
-
-### 3. Extract the engine + FMOD libs from the APK
-
-```bash
-unzip -j Geometry-Wars-3-*.apk 'lib/armeabi-v7a/libgwnext.so'  -d .
-unzip -j Geometry-Wars-3-*.apk 'lib/armeabi-v7a/libfmodex.so'  -d .
-unzip -j Geometry-Wars-3-*.apk 'lib/armeabi-v7a/libfmodevent.so' -d .
-```
+To reproduce CI fully, generate the bullseye sysroot first with
+`scripts/build-bullseye-sysroot.sh`, then copy `gw3.pm` → `gw3` and
+`libclock_fix.so` into `gw3-portmaster/gw3/` and zip the `gw3-portmaster/`
+directory.
 
 ---
 
 ## Installing on the device
 
-1. Copy the host binaries into `/roms/ports/gw3/`:
-   - `gw3`
-   - `libclock_fix.so`
-   - `gw3.sh` (to `/roms/ports/`, or bundle it in the port dir)
-2. Copy the user-supplied files into the same directory:
-   - `main.35.com.activision.gw3.dimensions.obb`
-   - `libgwnext.so`, `libfmodex.so`, `libfmodevent.so`
-3. Launch. `gw3.sh` checks for the required files, then runs `gw3`.
+Install through PortMaster, which unpacks the zip so the launcher sits next to
+the `gw3/` folder. Then drop your user-supplied files into the port's `gw3/`
+directory:
 
-The log lives at `/roms/ports/gw3/gw3.log` for postmortem debugging.
+- `main.35.com.activision.gw3.dimensions.obb`
+- the game APK - either a `.apk`, or a `.xapk` / `.apkm` bundle (which already
+  contains the OBB too)
+
+Launch the port. The launcher auto-extracts the engine + FMOD libraries
+(`libgwnext.so`, `libfmodex.so`, `libfmodevent.so`) from the APK on first run,
+verifies everything is present, then runs `gw3`. The log lives at
+`<port>/gw3/gw3.log` for postmortem debugging.
 
 ---
 
 ## Hardware / OS target
 
 - **CPU**: ARMv7-A 32-bit (Cortex-A7/A35/A53), NEON, hard-float
-- **GPU**: Mali / Panfrost GLES2 — bridged via KMS/DRM + `libGLESv2`
-- **Display**: 1280×720 (default; override via `patch_gw3`/config)
+- **GPU**: Mali / Panfrost GLES2 - bridged via KMS/DRM + `libGLESv2`
 - **OS**: ArkOS / NextOS / dArkOS (glibc 2.31+ for the PortMaster build)
-- **Audio**: ALSA only (FMOD Android build; OpenSL shim TODO)
+- **Audio**: the game's FMOD Ex/Event libraries via ALSA.
 
 ---
-
-## Acknowledgements
-
-This port is a fork of the NextOS-style **GTA: Chinatown Wars** R36S shim
-(MIT, @mafradon / GTACTW-Port-R36s), which itself builds on the JNI/NV-thread
-understanding from the GTA:CTW Vita port (@TheOfficialFloW/gtactw_vita).
-
-Geometry Wars 3: Dimensions is © Activision / Lucid Games. This repository
-contains only the port glue and Linux host code — no game assets are bundled.
