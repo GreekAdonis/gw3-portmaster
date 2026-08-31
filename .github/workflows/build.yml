@@ -72,12 +72,9 @@ jobs:
           set -euo pipefail
           notes="PortMaster build of Geometry Wars 3: Dimensions (${GITHUB_REF_NAME}).
 
-          Download **gw3.zip** below and install it through PortMaster
-          (or drop it in \`/roms/ports\` and let PortMaster unpack it).
+          Unzip **gw3.zip** into your device's ports folder (e.g. \`/roms/ports\`).
 
-          You must supply your own \`main.35.com.activision.gw3.dimensions.obb\`
-          and the engine/FMOD \`.so\` files from the game APK -- see the in-port
-          README for details."
+          You must supply your own copy of the game: the APK (or an .xapk / .apkm bundle) plus the OBB data file. Put them in the port's \`gw3/\` folder — the engine and FMOD libraries are unpacked from the APK automatically on first launch."
           # Create the release if it doesn't exist yet; otherwise just refresh
           # the asset. --clobber lets a re-run of the same tag replace gw3.zip.
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
