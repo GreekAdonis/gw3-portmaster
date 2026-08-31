@@ -55,11 +55,16 @@ PRELOAD := libclock_fix.so
 #     wins (no __isoc23_strtol@GLIBC_2.38), noble only fills SDL2/GLES/AL/…
 BULLSEYE := bullseye-sysroot/root
 
-# GCC's own intrinsic header dir (stddef.h, stdarg.h, …).  Needed because we
-# use -nostdinc to purge the cross-toolchain's BUILT-IN glibc headers, which
-# otherwise sit ahead of --sysroot and reintroduce the new-glibc redirects
-# (__isoc23_strtol@2.38, __*_time64@2.34).
-GCC_INC := $(shell $(CC) -print-file-name=include)
+# GCC's own intrinsic header dirs.  Needed because we use -nostdinc to purge the
+# cross-toolchain's BUILT-IN glibc headers, which otherwise sit ahead of
+# --sysroot and reintroduce the new-glibc redirects (__isoc23_strtol@2.38,
+# __*_time64@2.34).
+#   * include       -> stddef.h, stdarg.h, stdbool.h, …
+#   * include-fixed -> limits.h, syslimits.h.  glibc's <limits.h> ends with
+#     "#include_next <limits.h>" to reach the compiler's copy; without this dir
+#     the chain dead-ends ("fatal error: limits.h: No such file or directory").
+GCC_INC    := $(shell $(CC) -print-file-name=include)
+GCC_FIXINC := $(shell $(CC) -print-file-name=include-fixed)
 
 PM_CFLAGS := -march=armv7-a -mfpu=neon -mfloat-abi=hard \
              -O1 -g -fno-omit-frame-pointer \
@@ -69,6 +74,7 @@ PM_CFLAGS := -march=armv7-a -mfpu=neon -mfloat-abi=hard \
              -nostdinc \
              -I src \
              -isystem $(GCC_INC) \
+             -isystem $(GCC_FIXINC) \
              -isystem $(BULLSEYE)/usr/include/arm-linux-gnueabihf \
              -isystem $(BULLSEYE)/usr/include \
              -idirafter $(SYSROOT)/usr/include \
