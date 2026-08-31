@@ -88,13 +88,13 @@ that to your install root, or unpack the relevant `.deb` files there.
 ### 2. Build
 
 ```bash
-make           # produces ./gw3_r36 and ./libclock_fix.so
+make           # produces ./gw3 and ./libclock_fix.so
 ```
 
 For the old-glibc (PortMaster) binary:
 
 ```bash
-make portmaster   # produces ./gw3_r36.pm + ./libclock_fix.so
+make portmaster   # produces ./gw3.pm + ./libclock_fix.so
 ```
 
 Both are ARMv7-A hard-float ELFs.
@@ -112,13 +112,13 @@ unzip -j Geometry-Wars-3-*.apk 'lib/armeabi-v7a/libfmodevent.so' -d .
 ## Installing on the device
 
 1. Copy the host binaries into `/roms/ports/gw3/`:
-   - `gw3_r36`
+   - `gw3`
    - `libclock_fix.so`
    - `gw3.sh` (to `/roms/ports/`, or bundle it in the port dir)
 2. Copy the user-supplied files into the same directory:
    - `main.35.com.activision.gw3.dimensions.obb`
    - `libgwnext.so`, `libfmodex.so`, `libfmodevent.so`
-3. Launch. `gw3.sh` checks for the required files, then runs `gw3_r36`.
+3. Launch. `gw3.sh` checks for the required files, then runs `gw3`.
 
 The log lives at `/roms/ports/gw3/gw3.log` for postmortem debugging.
 

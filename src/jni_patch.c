@@ -40,9 +40,6 @@ extern SDL_GameController *g_gamepad;
 extern int g_gamepad_buttons;
 extern float g_gamepad_axis[6]; /* LX LY RX RY L2 R2 */
 
-/* Touch event function pointer (resolved from libCTW.so) */
-static int (*AND_TouchEvent)(int action, int report, int x, int y);
-
 /* ── JNI method-id ↔ name tracking (DISCOVERY build) ─────────────────── *
  * We do not yet know GW3's JNI contract, so instead of hard-coding GTA's
  * method names we record every method the engine looks up and every native
@@ -98,9 +95,6 @@ static void jni_tracef(const char *fmt, ...) {
 char fake_vm[0x1000];
 char fake_env[0x1000];
 
-static void *natives_ptr = NULL;   /* captured from RegisterNatives */
-static void (*game_init_fn)(void *, int, int) = NULL; /* first native's fnPtr */
-
 /* Stub for any JNI vtable slot that hasn't been implemented.
  * Returns 0 and logs which slot was hit (via LR → offset into table). */
 static int jni_unimpl(void) {
@@ -124,6 +118,14 @@ static void fill_table_with_stub(void *table, size_t size) {
 /* SDL window/context needed for GL operations */
 extern SDL_Window   *g_window;
 extern SDL_GLContext g_gl_ctx;
+
+/* Real panel dimensions, filled in by main() from the SDL window after it is
+ * created FULLSCREEN_DESKTOP.  The engine derives its internal render
+ * resolution AND aspect ratio from what we feed setDeviceScreenSize /
+ * setAppWindowSize / the GameConfig getters below, so these must be the
+ * native panel size, not a hardcoded guess.  Default to config.h until set. */
+extern int g_screen_w;
+extern int g_screen_h;
 
 /* ── JNI implementations ────────────────────────────────────────────────── */
 
@@ -245,8 +247,6 @@ static int DeleteFile(char *file) {
     return remove(path) == 0 ? 1 : 0;
 }
 
-void send_touch_event(int action, int slot, int x, int y);
-
 /* ── Input forwarding ──────────────────────────────────────────────────────
  * GW3 reads live pad state straight out of g_JoypadStates (dynsym 0x9240a8):
  * 4 joypads x 9 words = { u32 buttonMask, f32 axis[8] }.  We own joypad 0 and
@@ -279,15 +279,20 @@ static char *NewStringUTF(void *env, char *bytes);
 static char *GetStringUTFChars(void *env, char *str, int *isCopy);
 
 /* Config getters the engine reads from the GameConfig object.  Return sensible
- * defaults so viewInitGameConfig proceeds past resolution setup.  Refine as the
- * discovery log reveals the real contract.  Device resolution is 1024x768. */
+ * defaults so viewInitGameConfig proceeds past resolution setup.  The width /
+ * height getters MUST report the real panel size: viewInitGameConfig computes
+ * the internal render target from min(appWindowWidth, cap) and derives its
+ * height from appWindowWidth / (appWindowWidth/appWindowHeight), i.e. straight
+ * from this aspect ratio.  A hardcoded 1024x768 on a 720x720 panel is what made
+ * the picture stretched, then overspill the screen once gameplay switched to
+ * rendering the backbuffer render target directly. */
 static int config_int_value(const char *name) {
     if (!name) return 0;
     if (!strcmp(name, "tvDevice"))        return 0;     /* phone */
-    if (!strcmp(name, "nativeWidth"))     return 1024;
-    if (!strcmp(name, "nativeHeight"))    return 768;
-    if (!strcmp(name, "targetWidth"))     return 1024;
-    if (!strcmp(name, "targetHeight"))    return 768;
+    if (!strcmp(name, "nativeWidth"))     return g_screen_w;
+    if (!strcmp(name, "nativeHeight"))    return g_screen_h;
+    if (!strcmp(name, "targetWidth"))     return g_screen_w;
+    if (!strcmp(name, "targetHeight"))    return g_screen_h;
     return 0;
 }
 
@@ -396,10 +401,12 @@ static void CallStaticVoidMethodV(void *env, void *obj, int id, uintptr_t *args)
 
 static int GetVersion(void *env) { (void)env; return 0x00010006; }
 
+/* The engine uses name-based JNI linkage (Java_com_activision_gw3_common_
+ * GW3JNILib_*) and never calls this; kept only so the vtable slot resolves to
+ * something that logs rather than to the jni_unimpl stub. */
 static void RegisterNatives(void *env, int r1, void *r2) {
     (void)env; (void)r1;
-    natives_ptr = r2;
-    fprintf(stderr, "JNI: RegisterNatives ptr=%p\n", r2);
+    fprintf(stderr, "JNI: RegisterNatives ptr=%p (unexpected)\n", r2);
     uintptr_t *p = (uintptr_t *)r2;
     for (int i = 0; i < 64; i++) {
         const char *name = (const char *)p[i*3 + 0];
@@ -408,9 +415,6 @@ static void RegisterNatives(void *env, int r1, void *r2) {
         if (!name) break;
         fprintf(stderr, "   native[%d] %s %s -> %p\n", i, name, sig ? sig : "", fn);
     }
-    /* Best-effort: treat the first registered native as the entry point
-     * (matches GTA's convention). Confirm from the log above. */
-    if (p[2]) game_init_fn = (void (*)(void *, int, int))p[2];
 }
 
 static void *NewGlobalRef(void) { return (void *)0x42424242; }
@@ -592,7 +596,7 @@ void jni_load(void) {
     int *paused = (int *)so_symbol(&gw3_mod, "IsAndroidPaused");
     if (paused) *paused = 0;
 
-    /* JNI_OnLoad registers natives and stores them in natives_ptr */
+    /* JNI_OnLoad runs the engine's C++ static constructors. */
     int (*JNI_OnLoad)(void *vm, void *reserved) =
         (void *)so_symbol(&gw3_mod, "JNI_OnLoad");
     if (!JNI_OnLoad) {
@@ -603,7 +607,7 @@ void jni_load(void) {
     JNI_OnLoad(fake_vm, NULL);
     fprintf(stderr, "jni_load: JNI_OnLoad returned\n"); fflush(stderr);
 
-    if (!natives_ptr) {
+    {
         /* GW3's engine does NOT use RegisterNatives: it relies on Android's
          * name-based native linkage (Java_com_activision_gw3_common_GW3JNILib_*).
          * There is no Java layer here, so we drive the whole Android
@@ -670,8 +674,9 @@ void jni_load(void) {
         if (fn_setAssetManager)     STEP("setAssetManager",    fn_setAssetManager(fake_env, &fake_thiz, &fake_am));
         if (fn_setDeviceName)       STEP("setDeviceName",      fn_setDeviceName(fake_env, &fake_thiz, (void *)"R36S"));
         if (fn_setScreenSizeInches) STEP("setScreenSizeInches", fn_setScreenSizeInches(fake_env, &fake_thiz, inches_bits));
-        if (fn_setDeviceScreenSize) STEP("setDeviceScreenSize", fn_setDeviceScreenSize(fake_env, &fake_thiz, 1024, 768));
-        if (fn_setAppWindowSize)    STEP("setAppWindowSize",   fn_setAppWindowSize(fake_env, &fake_thiz, 1024, 768));
+        fprintf(stderr, "GW3 lifecycle: feeding panel size %dx%d\n", g_screen_w, g_screen_h);
+        if (fn_setDeviceScreenSize) STEP("setDeviceScreenSize", fn_setDeviceScreenSize(fake_env, &fake_thiz, g_screen_w, g_screen_h));
+        if (fn_setAppWindowSize)    STEP("setAppWindowSize",   fn_setAppWindowSize(fake_env, &fake_thiz, g_screen_w, g_screen_h));
         if (fn_setGameFilesDir)     STEP("setGameFilesDir",    fn_setGameFilesDir(fake_env, &fake_thiz, (void *)data_path_slash()));
         if (fn_setPrivateFilesDir)  STEP("setPrivateFilesDir", fn_setPrivateFilesDir(fake_env, &fake_thiz, (void *)data_path_slash()));
         /* g_NoJoypads is the *count* of connected pads (see main.c note).
@@ -687,7 +692,7 @@ void jni_load(void) {
         STEP("viewInitGameConfig", fn_viewInitGameConfig(fake_env, &fake_thiz, &fake_config));
         if (fn_viewOnSurfaceCreated) STEP("viewOnSurfaceCreated", fn_viewOnSurfaceCreated(fake_env, &fake_thiz));
         STEP("viewOnInit", fn_viewOnInit(fake_env, &fake_thiz));
-        if (fn_viewOnSurfaceChanged) STEP("viewOnSurfaceChanged", fn_viewOnSurfaceChanged(fake_env, &fake_thiz, 1024, 768));
+        if (fn_viewOnSurfaceChanged) STEP("viewOnSurfaceChanged", fn_viewOnSurfaceChanged(fake_env, &fake_thiz, g_screen_w, g_screen_h));
         if (fn_viewOnResume) STEP("viewOnResume", fn_viewOnResume(fake_env, &fake_thiz));
         #undef STEP
 
@@ -722,30 +727,5 @@ void jni_load(void) {
         }
         fprintf(stderr, "GW3 lifecycle: draw loop exited\n"); fflush(stderr);
         SDL_Quit();
-        return;
     }
-    fprintf(stderr, "jni_load: natives_ptr=%p init_fn=%p\n", natives_ptr, (void*)game_init_fn); fflush(stderr);
-
-    /* Release the GL context from the main thread so the game's rendering
-     * thread can make it current (eglMakeCurrent fails with EGL_BAD_ACCESS
-     * if the context is still current on another thread). */
-    SDL_GL_MakeCurrent(g_window, NULL);
-
-    game_init_fn(fake_env, 0, 1);
-    fprintf(stderr, "jni_load: game_init_fn returned — threads spawned, main waiting\n");
-    fflush(stderr);
-    /* NVEventAppInit returned — game loop runs in spawned threads. Keep
-     * the main thread alive until game exits. */
-    for (;;) pause();
-}
-
-/* ── Touch event sender (called from ProcessEvents) ──────────────────── */
-
-void jni_resolve_touch(void) {
-    AND_TouchEvent = (void *)so_symbol(&gw3_mod, "_Z14AND_TouchEventiiii");
-}
-
-void send_touch_event(int action, int slot, int x, int y) {
-    if (AND_TouchEvent)
-        AND_TouchEvent(action, slot, x, y);
 }

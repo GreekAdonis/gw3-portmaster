@@ -22,7 +22,7 @@ included in this port.
    - `libfmodex.so`     (FMOD Ex, from APK lib/armeabi-v7a/)
    - `libfmodevent.so`  (FMOD Event, from APK lib/armeabi-v7a/)
 3. Launch the port. The launcher verifies the files are present, then runs
-   `gw3_r36` (the engine reads the OBB directly — no unpacking step).
+   `gw3` (the engine reads the OBB directly — no unpacking step).
 
 ## Status
 

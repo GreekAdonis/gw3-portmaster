@@ -3,9 +3,11 @@
 
 /* Geometry Wars 3: Dimensions — native ARMv7 loader (NextOS-style shim) */
 
-/* Render resolution. GW3 is a 1280x720 game; handhelds typically run 640x480
- * or native panel res. Start at 1280x720 (the game's native) and tune per-device.
- * Touch/analog mapping scales automatically. */
+/* Fallback render resolution ONLY. At runtime main() overwrites g_screen_w/h
+ * with the SDL window's real size (FULLSCREEN_DESKTOP = native panel mode) and
+ * jni_patch.c feeds that to the engine, so it renders at native res/aspect on
+ * whatever panel it lands on. These values are used only if the SDL query
+ * fails. GW3's internal design space is 1280x720. */
 #define SCREEN_W    1024
 #define SCREEN_H    768
 

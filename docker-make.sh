@@ -2,7 +2,7 @@
 # docker-make.sh -- build the GW3 armhf binary inside a Docker container.
 #
 # Usage:
-#   ./docker-make.sh            # build gw3_r36 + libclock_fix.so
+#   ./docker-make.sh            # build gw3 + libclock_fix.so
 #   ./docker-make.sh clean      # make clean
 #   ./docker-make.sh portmaster # build the old-glibc (bullseye) binary too
 #   ./docker-make.sh shell      # drop into the build container for debugging

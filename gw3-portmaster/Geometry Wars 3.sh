@@ -96,6 +96,44 @@ echo 0 | $ESUDO tee /sys/class/vtconsole/vtcon1/bind > /dev/null 2>&1
 $ESUDO chmod 666 /sys/class/vtconsole/vtcon0/bind 2>/dev/null
 $ESUDO chmod 666 /sys/class/vtconsole/vtcon1/bind 2>/dev/null
 
+# ── Auto-extract engine + FMOD libs from an APK/XAPK ──────────────────────
+# libgwnext.so / libfmodex.so / libfmodevent.so live only inside the game APK
+# (lib/armeabi-v7a/).  Drop the .apk — or an .xapk/.apkm bundle, which also
+# carries the OBB — into $GAMEDIR and we unzip them here automatically.
+gw3_extract_libs() {   # $1 = apk file
+    unzip -o -j "$1" \
+        'lib/armeabi-v7a/libgwnext.so' \
+        'lib/armeabi-v7a/libfmodex.so' \
+        'lib/armeabi-v7a/libfmodevent.so' -d "$GAMEDIR" >/dev/null 2>&1
+    chmod 644 "$GAMEDIR"/libgwnext.so "$GAMEDIR"/libfmodex.so \
+              "$GAMEDIR"/libfmodevent.so 2>/dev/null
+}
+if [ ! -f "$GAMEDIR/libgwnext.so" ]; then
+    for _apk in "$GAMEDIR"/*.apk; do
+        [ -f "$_apk" ] || continue
+        echo "gw3: extracting engine libs from $(basename "$_apk")"
+        gw3_extract_libs "$_apk"
+        [ -f "$GAMEDIR/libgwnext.so" ] && break
+    done
+fi
+if [ ! -f "$GAMEDIR/libgwnext.so" ]; then
+    for _bundle in "$GAMEDIR"/*.xapk "$GAMEDIR"/*.apkm; do
+        [ -f "$_bundle" ] || continue
+        echo "gw3: unpacking bundle $(basename "$_bundle")"
+        _tmp="$GAMEDIR/.bundle.$$"
+        rm -rf "$_tmp"; mkdir -p "$_tmp" || continue
+        unzip -o -q "$_bundle" -d "$_tmp"
+        find "$_tmp" -iname '*.obb' -exec cp -n {} "$GAMEDIR/" \;
+        find "$_tmp" -iname '*.apk' | while read -r _a; do
+            unzip -l "$_a" 2>/dev/null | grep -q 'lib/armeabi-v7a/libgwnext.so' || continue
+            gw3_extract_libs "$_a"
+            break
+        done
+        rm -rf "$_tmp"
+        [ -f "$GAMEDIR/libgwnext.so" ] && break
+    done
+fi
+
 # ── First-run data check ───────────────────────────────────────────────────
 # The engine reads the OBB directly; we just need the user-supplied files.
 OBB_FILE=$(ls "$GAMEDIR"/*.obb 2>/dev/null | head -1)
@@ -105,9 +143,11 @@ if [ -z "$OBB_FILE" ] || [ ! -f "$GAMEDIR/libgwnext.so" ] \
     echo "============================================================"
     echo "  Geometry Wars 3 — INSTALLATION INCOMPLETE"
     echo "============================================================"
-    echo "Place these files in:  $GAMEDIR/"
-    echo "  - main.35.com.activision.gw3.dimensions.obb  (game data)"
-    echo "  - libgwnext.so / libfmodex.so / libfmodevent.so (from the APK)"
+    echo "Put your own copies of these in:  $GAMEDIR/"
+    echo "  - the game APK (Geometry*.apk, .xapk or .apkm) — engine + FMOD"
+    echo "    libs are unpacked from it automatically"
+    echo "  - main.35.com.activision.gw3.dimensions.obb (an .xapk/.apkm"
+    echo "    bundle already contains this)"
     echo "Status:"
     [ -n "$OBB_FILE" ] && echo "  [OK]      OBB found: $(basename "$OBB_FILE")" || echo "  [MISSING] No *.obb file found"
     [ -f "$GAMEDIR/libgwnext.so" ]    && echo "  [OK]      libgwnext.so"    || echo "  [MISSING] libgwnext.so"
@@ -131,11 +171,11 @@ GAME_PRELOAD="$GAMEDIR/libclock_fix.so"
 
 USE_GPTOKEYB="${USE_GPTOKEYB:-0}"
 if [ "$USE_GPTOKEYB" = "1" ] && [ -n "$GPTOKEYB" ]; then
-    $GPTOKEYB "gw3_r36" -c "$GAMEDIR/gw3.gptk" &
+    $GPTOKEYB "gw3" -c "$GAMEDIR/gw3.gptk" &
 fi
 
-pm_platform_helper "$GAMEDIR/gw3_r36"
+pm_platform_helper "$GAMEDIR/gw3"
 
-LD_PRELOAD="$GAME_PRELOAD" ./gw3_r36 &
+LD_PRELOAD="$GAME_PRELOAD" ./gw3 &
 GAME_PID=$!
 wait "$GAME_PID"

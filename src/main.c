@@ -25,7 +25,6 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <zlib.h>
-#include <linux/input.h>
 
 #include <SDL2/SDL.h>
 #include <GLES2/gl2.h>
@@ -48,6 +47,14 @@ SDL_GameController *g_gamepad = NULL;
 int                 g_gamepad_buttons = 0;
 float               g_gamepad_axis[6] = { 0 };
 char                g_data_path[512]  = DATA_PATH;
+
+/* Real panel dimensions.  Seeded from config.h, overwritten in main() with the
+ * SDL window's actual size once it is created FULLSCREEN_DESKTOP.  jni_patch.c
+ * feeds these to the engine (setDeviceScreenSize / setAppWindowSize / the
+ * GameConfig width/height getters) so it renders at native res / aspect for
+ * whatever panel it lands on (1024x768 Ultra X, 720x720 Ultra, ...). */
+int                 g_screen_w = SCREEN_W;
+int                 g_screen_h = SCREEN_H;
 
 /* FMOD companion modules, loaded from the data dir (see fmod_patch.c). */
 so_module fm_mod, fme_mod;
@@ -274,8 +281,8 @@ int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
 
 /* ── Screen size (hooked into .so) ───────────────────────────────────────── */
 
-int OS_ScreenGetWidth(void)  { return SCREEN_W; }
-int OS_ScreenGetHeight(void) { return SCREEN_H; }
+int OS_ScreenGetWidth(void)  { return g_screen_w; }
+int OS_ScreenGetHeight(void) { return g_screen_h; }
 
 /* ── Bionic pthread/semaphore ABI shims ──────────────────────────────────────
  * On Android bionic (32-bit): mutex=4 bytes, cond=4 bytes, sem=4 bytes.
@@ -491,36 +498,6 @@ static int pthread_create_fake(pthread_t *tidp, bionic_attr_t *attr,
     return r;
 }
 
-/* ── OS_ThreadLaunch / OS_ThreadWait (real pthreads for worker threads) ── */
-
-typedef struct { int (*func)(void *); void *arg; } thread_args;
-
-static void *thread_trampoline(void *p) {
-    thread_args *ta = p;
-    ta->func(ta->arg);
-    free(ta);
-    return NULL;
-}
-
-void *OS_ThreadLaunch(int (*func)(void *), void *arg, int cpu,
-                      const char *name, int unused, int priority) {
-    (void)cpu; (void)unused; (void)priority;
-    pthread_t *tid = malloc(sizeof(pthread_t));
-    thread_args *ta = malloc(sizeof(thread_args));
-    ta->func = func;
-    ta->arg  = arg;
-    init_real_pthread_create();
-    real_pthread_create(tid, NULL, thread_trampoline, ta);
-    pthread_setname_np(*tid, name ? name : "worker");
-    return tid;
-}
-
-void OS_ThreadWait(void *thread) {
-    if (!thread) return;
-    pthread_join(*(pthread_t *)thread, NULL);
-    free(thread);
-}
-
 /* ── stat hook: game checks mtime at statbuf+0x50 (Android struct layout) ── */
 
 static int stat_hook(const char *path, void *statbuf) {
@@ -583,87 +560,6 @@ static int   stack_chk_guard_fake = 0x42424242;
 
 /* ctype_ pointer: provided via android_ctype_table below */
 
-/* ── Touchscreen evdev reader ───────────────────────────────────────────────
- * Reads multitouch type-B (MT slot) events from /dev/input/event1
- * (Hynitron cst3xx Touchscreen) and dispatches to the game via AND_TouchEvent.
- * action: 0=down, 1=move, 2=up
- *
- * TOUCH_MAX_X/Y: native reporting range of the touchscreen.  Defaults to
- * SCREEN_W/H (640×480); adjust here if the touchscreen reports different coords.
- */
-#define MAX_TOUCH_SLOTS 5
-#define TOUCH_MAX_X     SCREEN_W
-#define TOUCH_MAX_Y     SCREEN_H
-
-static int g_touch_fd = -1;
-
-typedef struct {
-    int tracking_id;   /* -1 = slot empty */
-    int x, y;
-    int prev_active;
-    int dirty;
-} touch_slot_t;
-
-static touch_slot_t g_slots[MAX_TOUCH_SLOTS];
-static int          g_cur_slot = 0;
-
-static void init_touchscreen(void) {
-    for (int i = 0; i < MAX_TOUCH_SLOTS; i++) {
-        g_slots[i].tracking_id = -1;
-        g_slots[i].prev_active  = 0;
-        g_slots[i].dirty        = 0;
-    }
-    g_touch_fd = open("/dev/input/event1", O_RDONLY | O_NONBLOCK);
-    if (g_touch_fd < 0)
-        fprintf(stderr, "touchscreen: open /dev/input/event1: %s\n", strerror(errno));
-    else
-        fprintf(stderr, "touchscreen: opened fd=%d\n", g_touch_fd);
-}
-
-static void process_touch_events(void) {
-    if (g_touch_fd < 0) return;
-    struct input_event ev;
-    while (read(g_touch_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
-        if (ev.type == EV_ABS) {
-            switch (ev.code) {
-            case ABS_MT_SLOT:
-                if ((unsigned)ev.value < MAX_TOUCH_SLOTS)
-                    g_cur_slot = ev.value;
-                break;
-            case ABS_MT_TRACKING_ID:
-                if (g_cur_slot < MAX_TOUCH_SLOTS)
-                    g_slots[g_cur_slot].tracking_id = ev.value;
-                break;
-            case ABS_MT_POSITION_X:
-                if (g_cur_slot < MAX_TOUCH_SLOTS) {
-                    g_slots[g_cur_slot].x = ev.value * SCREEN_W / TOUCH_MAX_X;
-                    g_slots[g_cur_slot].dirty = 1;
-                }
-                break;
-            case ABS_MT_POSITION_Y:
-                if (g_cur_slot < MAX_TOUCH_SLOTS) {
-                    g_slots[g_cur_slot].y = ev.value * SCREEN_H / TOUCH_MAX_Y;
-                    g_slots[g_cur_slot].dirty = 1;
-                }
-                break;
-            }
-        } else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
-            for (int i = 0; i < MAX_TOUCH_SLOTS; i++) {
-                int active = (g_slots[i].tracking_id != -1);
-                if (active && !g_slots[i].prev_active) {
-                    send_touch_event(0, i, g_slots[i].x, g_slots[i].y); /* ACTION_DOWN */
-                } else if (!active && g_slots[i].prev_active) {
-                    send_touch_event(1, i, g_slots[i].x, g_slots[i].y); /* ACTION_UP */
-                } else if (active && g_slots[i].dirty) {
-                    send_touch_event(2, i, g_slots[i].x, g_slots[i].y); /* ACTION_MOVE */
-                }
-                g_slots[i].prev_active = active;
-                g_slots[i].dirty       = 0;
-            }
-        }
-    }
-}
-
 /* ── ProcessEvents: called once per frame by the game ────────────────────── */
 
 int ProcessEvents(void) {
@@ -710,8 +606,6 @@ int ProcessEvents(void) {
         g_gamepad_axis[4] = SDL_GameControllerGetAxis(g_gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT)  / 32767.0f;
         g_gamepad_axis[5] = SDL_GameControllerGetAxis(g_gamepad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 32767.0f;
     }
-
-    process_touch_events();
 
     return 0; /* 1 = exit */
 }
@@ -792,17 +686,6 @@ static const char android_ctype_table[257] = {
 };
 /* _ctype_ is a char* pointing to android_ctype_table[1] so that ptr[c] works for c=0..255 */
 static const char *ctype_ptr_val = android_ctype_table + 1;
-
-/* ── ImmVibe stubs (haptics — stub as no-ops) ────────────────────────────── */
-
-static int ImmVibeInitialize2(void *p)                               { (void)p; return 0; }
-static int ImmVibeOpenDevice(int d, int *h)                          { (void)d; if(h)*h=0; return 0; }
-static int ImmVibeCloseDevice(int h)                                 { (void)h; return 0; }
-static int ImmVibeTerminate(void)                                     { return 0; }
-static int ImmVibePlayUHLEffect(int h, int e, int i, int *p)         { (void)h;(void)e;(void)i;(void)p; return 0; }
-static int ImmVibeStopPlayingEffect(int h, int e)                    { (void)h;(void)e; return 0; }
-static int ImmVibeGetEffectState(int h, int e, int *s)               { (void)h;(void)e; if(s)*s=0; return 0; }
-static int ImmVibeGetIVTEffectIndexFromName(void *d, void *n, int *i){ (void)d;(void)n;(void)i; return 0; }
 
 /* resolve_stream: bionic __sF[n] lands inside sF_fake[] — map back to glibc streams. */
 static FILE *resolve_stream(FILE *s) {
@@ -922,16 +805,6 @@ static so_default_dynlib default_dynlib[] = {
     { "__android_log_print", (uintptr_t)__android_log_print },
     /* AAssetManager_* live in the later AAssetManager (NDK) block, implemented
      * in aasset_patch.c (filesystem-backed shim). */
-
-    /* ── Haptics (libImmEmulatorJ) ────────────────────────────────────── */
-    { "ImmVibeInitialize2",              (uintptr_t)ImmVibeInitialize2              },
-    { "ImmVibeOpenDevice",               (uintptr_t)ImmVibeOpenDevice               },
-    { "ImmVibeCloseDevice",              (uintptr_t)ImmVibeCloseDevice              },
-    { "ImmVibeTerminate",                (uintptr_t)ImmVibeTerminate                },
-    { "ImmVibePlayUHLEffect",            (uintptr_t)ImmVibePlayUHLEffect            },
-    { "ImmVibeStopPlayingEffect",        (uintptr_t)ImmVibeStopPlayingEffect        },
-    { "ImmVibeGetEffectState",           (uintptr_t)ImmVibeGetEffectState           },
-    { "ImmVibeGetIVTEffectIndexFromName",(uintptr_t)ImmVibeGetIVTEffectIndexFromName},
 
     /* ── Standard C / POSIX (forward to glibc) ───────────────────────── */
     { "abort",        (uintptr_t)abort_hook   },
@@ -1825,6 +1698,24 @@ int main(int argc, char *argv[]) {
     SDL_GL_MakeCurrent(g_window, g_gl_ctx);
     SDL_GL_SetSwapInterval(1);
 
+    /* Resolve the ACTUAL panel size. FULLSCREEN_DESKTOP means the window is now
+     * the panel's native mode regardless of the SCREEN_W/H we asked for. The
+     * engine builds its render target + aspect ratio from whatever we report to
+     * setAppWindowSize/setDeviceScreenSize (see jni_patch.c), so a wrong value
+     * here is what stretches the image and later overspills the screen. */
+    {
+        int dw = 0, dh = 0;
+        SDL_GL_GetDrawableSize(g_window, &dw, &dh);
+        if (dw < 320 || dh < 240) SDL_GetWindowSize(g_window, &dw, &dh);
+        if (dw < 320 || dh < 240) {
+            SDL_DisplayMode dm;
+            if (SDL_GetDesktopDisplayMode(0, &dm) == 0) { dw = dm.w; dh = dm.h; }
+        }
+        if (dw >= 320 && dh >= 240) { g_screen_w = dw; g_screen_h = dh; }
+        fprintf(stderr, "display: panel %dx%d (requested %dx%d)\n",
+                g_screen_w, g_screen_h, SCREEN_W, SCREEN_H);
+    }
+
     /* Install signal handlers AFTER SDL_Init so we override SDL2's handlers.
      * SDL2 installs its own SIGSEGV handler during SDL_Init which re-raises
      * (via tgkill, giving si_code=-6) and obscures the real fault PC.
@@ -1903,10 +1794,6 @@ int main(int argc, char *argv[]) {
     so_initialize(&gw3_mod);
     fprintf(stderr, "so_initialize OK\n");
 
-    /* ── Touchscreen init ───────────────────────────────────────────── */
-    init_touchscreen();
-
-    jni_resolve_touch();
     fprintf(stderr, "jni_load...\n");
     jni_load(); /* never returns — runs the game loop */
 

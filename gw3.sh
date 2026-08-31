@@ -39,6 +39,46 @@ $ESUDO pkill -9    emulationstation 2>/dev/null || true
 printf "\033c"   > $CURR_TTY    # clear
 printf "\e[?25l" > $CURR_TTY    # hide cursor
 
+# ── Auto-extract engine + FMOD libs from an APK/XAPK ──────────────────────
+# libgwnext.so / libfmodex.so / libfmodevent.so live only inside the game APK
+# (lib/armeabi-v7a/).  Drop the .apk — or an .xapk/.apkm bundle, which also
+# carries the OBB — into $GAMEDIR and we unzip them here so the user never has
+# to do it by hand.
+gw3_extract_libs() {   # $1 = apk file
+    unzip -o -j "$1" \
+        'lib/armeabi-v7a/libgwnext.so' \
+        'lib/armeabi-v7a/libfmodex.so' \
+        'lib/armeabi-v7a/libfmodevent.so' -d "$GAMEDIR" >/dev/null 2>&1
+    chmod 644 "$GAMEDIR"/libgwnext.so "$GAMEDIR"/libfmodex.so \
+              "$GAMEDIR"/libfmodevent.so 2>/dev/null
+}
+
+if [ ! -f "$GAMEDIR/libgwnext.so" ]; then
+    for _apk in "$GAMEDIR"/*.apk; do
+        [ -f "$_apk" ] || continue
+        echo "gw3: extracting engine libs from $(basename "$_apk")"
+        gw3_extract_libs "$_apk"
+        [ -f "$GAMEDIR/libgwnext.so" ] && break
+    done
+fi
+if [ ! -f "$GAMEDIR/libgwnext.so" ]; then
+    for _bundle in "$GAMEDIR"/*.xapk "$GAMEDIR"/*.apkm; do
+        [ -f "$_bundle" ] || continue
+        echo "gw3: unpacking bundle $(basename "$_bundle")"
+        _tmp="$GAMEDIR/.bundle.$$"
+        rm -rf "$_tmp"; mkdir -p "$_tmp" || continue
+        unzip -o -q "$_bundle" -d "$_tmp"
+        find "$_tmp" -iname '*.obb' -exec cp -n {} "$GAMEDIR/" \;
+        find "$_tmp" -iname '*.apk' | while read -r _a; do
+            unzip -l "$_a" 2>/dev/null | grep -q 'lib/armeabi-v7a/libgwnext.so' || continue
+            gw3_extract_libs "$_a"
+            break
+        done
+        rm -rf "$_tmp"
+        [ -f "$GAMEDIR/libgwnext.so" ] && break
+    done
+fi
+
 # ── First-run check ───────────────────────────────────────────────────────
 # Geometry Wars 3 needs: the OBB (game data), the engine .so, and the FMOD libs.
 OBB_FILE=$(ls "$GAMEDIR"/*.obb 2>/dev/null | head -1)
@@ -50,12 +90,12 @@ if [ -z "$OBB_FILE" ] || [ ! -f "$GAMEDIR/libgwnext.so" ] \
     echo "  Geometry Wars 3 — INSTALLATION INCOMPLETE"
     echo "============================================================"
     echo ""
-    echo "Place these files in:  $GAMEDIR/"
+    echo "Put your own copies of these in:  $GAMEDIR/"
     echo ""
-    echo "  - main.35.com.activision.gw3.dimensions.obb  (game data)"
-    echo "  - libgwnext.so     (extracted from the APK: lib/armeabi-v7a/)"
-    echo "  - libfmodex.so     (extracted from the APK: lib/armeabi-v7a/)"
-    echo "  - libfmodevent.so  (extracted from the APK: lib/armeabi-v7a/)"
+    echo "  - the game APK  (Geometry*.apk, .xapk or .apkm) — the engine"
+    echo "    and FMOD libraries are unpacked from it automatically"
+    echo "  - main.35.com.activision.gw3.dimensions.obb  (game data;"
+    echo "    an .xapk / .apkm bundle already contains this)"
     echo ""
     echo "Status:"
     [ -n "$OBB_FILE" ] && echo "  [OK]      OBB found: $(basename "$OBB_FILE")" \
@@ -96,7 +136,7 @@ export LD_LIBRARY_PATH="/usr/lib/arm-linux-gnueabihf:$LD_LIBRARY_PATH"
 # Preload our __clock_gettime64 override (bionic/old-glibc time64 mismatch)
 export LD_PRELOAD="$GAMEDIR/libclock_fix.so"
 
-./gw3_r36
+./gw3
 
 # Restore VT console and restart frontend
 echo 1 | $ESUDO tee /sys/class/vtconsole/vtcon0/bind > /dev/null 2>&1 || true

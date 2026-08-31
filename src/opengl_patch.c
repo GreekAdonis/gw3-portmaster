@@ -19,14 +19,6 @@ extern so_module gw3_mod;
 /* Real eglGetProcAddress from libEGL, resolved at patch time. */
 static void *(*real_eglGetProcAddress)(const char *) = NULL;
 
-static GLuint cur_prog;
-
-/* Camera view matrix — captured from first p=18 MV upload per frame.
- * Used by fix_sprite_translation to convert p=12 world-space translations
- * to view space. */
-static GLfloat g_view_mat[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
-static int     g_view_mat_valid = 0;
-
 /* ── Pass-through hooks (main.c dynlib table entries) ─────────────────── */
 
 void glBindAttribLocationHook(GLuint prog, GLuint index, const char *name) {
@@ -75,16 +67,7 @@ void glDrawElementsHook(GLenum mode, GLsizei count, GLenum type, const void *idx
 void glEnableVertexAttribArrayHook(GLuint idx)  { glEnableVertexAttribArray(idx); }
 void glDisableVertexAttribArrayHook(GLuint idx) { glDisableVertexAttribArray(idx); }
 
-/* ── glDrawArraysHook: frame boundary detection for view matrix reset ─── */
-
 void glDrawArraysHook(GLenum mode, GLint first, GLsizei count) {
-    static GLuint prev_prog = 0;
-    /* Heuristic: when prog transitions from any high program back to p=3,
-     * a new frame has started — reset view matrix capture so p=18's first
-     * upload this frame is used. */
-    if (cur_prog == 3 && prev_prog > 3)
-        g_view_mat_valid = 0;
-    prev_prog = cur_prog;
     glDrawArrays(mode, first, count);
 }
 
@@ -104,54 +87,11 @@ void glLinkProgramHook(GLuint prog) {
 
 void glUseProgramHook(GLuint prog) {
     glUseProgram(prog);
-    cur_prog = prog;
-}
-
-/* ── p=12 world-space matrix fix ──────────────────────────────────────── *
- * p=12 (FLAG_3D|TEXTURE, non-lit world objects) receives a model matrix   *
- * whose translation is in world short-integer space rather than view       *
- * space. Multiply the translation column by the captured view matrix to    *
- * bring it into view space before handing it to the GPU.                  */
-
-static void fix_sprite_translation(GLfloat *mv) {
-    GLfloat tx = mv[12], ty = mv[13], tz = mv[14];
-    mv[12] = g_view_mat[0]*tx + g_view_mat[4]*ty + g_view_mat[8]*tz  + g_view_mat[12];
-    mv[13] = g_view_mat[1]*tx + g_view_mat[5]*ty + g_view_mat[9]*tz  + g_view_mat[13];
-    mv[14] = g_view_mat[2]*tx + g_view_mat[6]*ty + g_view_mat[10]*tz + g_view_mat[14];
 }
 
 void glUniformMatrix4fvHook(GLint location, GLsizei count,
                              GLboolean transpose, const GLfloat *value) {
-    /* GW3: pass matrices straight through. The cur_prog-keyed rewrites below are
-     * GTA-CTW-specific (its shader program numbering) and corrupt GW3's MVP. */
     glUniformMatrix4fv(location, count, transpose, value);
-    return;
-#if 0
-    /* p=18 (lit world geometry): capture the first per-frame V matrix.
-     * M00 < 0.1 identifies the view matrix (scale ~1/64); later per-object
-     * uploads have M00≈1 and must be left untouched. */
-    if (cur_prog == 18 && count >= 1 && !transpose) {
-        if (value[0] < 0.1f && !g_view_mat_valid) {
-            memcpy(g_view_mat, value, 16 * sizeof(GLfloat));
-            g_view_mat_valid = 1;
-        }
-        glUniformMatrix4fv(location, count, transpose, value);
-        return;
-    }
-
-    /* p=12: world-space model matrix at loc=2 (M00>0.5 → not yet view-space).
-     * Apply the captured view transform to its translation column. */
-    if (cur_prog == 12 && location == 2 && count >= 1 && !transpose
-            && g_view_mat_valid && value[0] > 0.5f) {
-        GLfloat mv[16];
-        memcpy(mv, value, 16 * sizeof(GLfloat));
-        fix_sprite_translation(mv);
-        glUniformMatrix4fv(location, count, transpose, mv);
-        return;
-    }
-
-    glUniformMatrix4fv(location, count, transpose, value);
-#endif
 }
 
 /* ── GL_BGRA_EXT → GL_RGBA fix ────────────────────────────────────────── *

@@ -5,7 +5,7 @@
 #
 # Quick start:
 #   make setup    # install cross-dev packages (needs sudo)
-#   make          # build gw3_r36
+#   make          # build gw3
 #   make data     # prepare game data directory
 
 CROSS   := arm-linux-gnueabihf-
@@ -38,7 +38,7 @@ SRCS    := src/main.c \
            src/fmod_opensl.c
 
 OBJS    := $(SRCS:.c=.o)
-TARGET  := gw3_r36
+TARGET  := gw3
 PRELOAD := libclock_fix.so
 
 # ── PortMaster (old-glibc) build ───────────────────────────────────────────
