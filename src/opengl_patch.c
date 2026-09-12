@@ -295,13 +295,27 @@ SOFTFP void glBlendColor_abi(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
 #ifndef GL_WRITE_ONLY_OES
 #define GL_WRITE_ONLY_OES 0x88B9
 #endif
+/* Resolve a real GL/EGL entry point. dlsym first: it finds the same GLES
+ * library our own gl* calls and the engine's direct GL imports bind to (the
+ * one SDL made the context current on). eglGetProcAddress is only a fallback:
+ * on glvnd systems (e.g. dArkOS RE, Debian trixie) libEGL.so.1 is the glvnd
+ * dispatcher while SDL creates the context through libMali's EGL, so glvnd has
+ * no current context and hands back libGLdispatch no-op stubs — glMapBufferOES
+ * then returns NULL and the engine writes its vertices to address 0. */
+static void *gl_real_proc(const char *name) {
+    void *p = name ? dlsym(RTLD_DEFAULT, name) : NULL;
+    if (!p && real_eglGetProcAddress)
+        p = real_eglGetProcAddress(name);
+    return p;
+}
+
 static void *(*p_glMapBufferOES)(GLenum, GLenum);
 static void *glMapBufferRange_emu(GLenum target, GLintptr offset,
                                   GLsizeiptr length, GLbitfield access) {
     (void)length; (void)access;
-    if (!p_glMapBufferOES && real_eglGetProcAddress)
+    if (!p_glMapBufferOES)
         p_glMapBufferOES = (void *(*)(GLenum, GLenum))
-            real_eglGetProcAddress("glMapBufferOES");
+            gl_real_proc("glMapBufferOES");
     if (!p_glMapBufferOES) return NULL;
     void *base = p_glMapBufferOES(target, GL_WRITE_ONLY_OES);
     return base ? (char *)base + offset : NULL;
@@ -353,7 +367,7 @@ void *eglGetProcAddress_ovr(const char *name) {
             }
         }
     }
-    void *p = real_eglGetProcAddress ? real_eglGetProcAddress(name) : NULL;
+    void *p = gl_real_proc(name);
     fprintf(stderr, "GW3 GL PROC: %-34s -> %p%s\n",
             name ? name : "(null)", p, p ? "" : "   *** NULL ***");
     fflush(stderr);
